@@ -1,0 +1,289 @@
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { Plus, Pencil, Trash2, Settings, Clock, GraduationCap } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/lib/auth";
+import { Card, CardContent } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  PageHeader,
+  InlineLoading,
+  EmptyState,
+  ErrorState,
+} from "@/components/ui-states";
+import { StartExamDialog } from "@/components/start-exam-dialog";
+import { ExamWizard } from "@/components/exam-wizard";
+import { examStatusLabels } from "@/lib/format";
+
+export const Route = createFileRoute("/_authenticated/exams")({
+  head: () => ({
+    meta: [
+      { title: "آزمون‌ها | سامانه آزمون آنلاین استخدامی" },
+      { name: "description", content: "مدیریت آزمون‌های استخدامی، ایجاد و ویرایش آزمون‌ها." },
+      { property: "og:title", content: "آزمون‌ها" },
+      { property: "og:description", content: "مدیریت آزمون‌های سامانه." },
+    ],
+  }),
+  component: ExamsPage,
+});
+
+type ExamRow = {
+  id: string;
+  title: string;
+  description: string | null;
+  duration_minutes: number;
+  status: string;
+  passing_score: number;
+  access_type: string;
+  category_id: string | null;
+  categories: { name: string } | null;
+  exam_categories: { category_id: string; categories: { name: string } | null }[];
+};
+
+type ExamStatus = "draft" | "published" | "finished";
+type AccessType = "public" | "private";
+
+type FormState = {
+  id: string;
+  title: string;
+  description: string;
+  duration_minutes: string;
+  passing_score: string;
+  status: ExamStatus;
+  access_type: AccessType;
+  max_attempts: string;
+  show_correct_answers: boolean;
+  randomize_questions: boolean;
+  randomize_options: boolean;
+  category_id: string;
+  category_ids: string[];
+};
+
+const emptyForm: FormState = {
+  id: "",
+  title: "",
+  description: "",
+  duration_minutes: "30",
+  passing_score: "50",
+  status: "draft",
+  access_type: "public",
+  max_attempts: "1",
+  show_correct_answers: true,
+  randomize_questions: false,
+  randomize_options: false,
+  category_id: "",
+  category_ids: [],
+};
+
+function ExamsPage() {
+  const { role } = useAuth();
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [wizardExamId, setWizardExamId] = useState<string | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [startExam, setStartExam] = useState<ExamRow | null>(null);
+
+  const categories = useQuery({
+    queryKey: ["categories", "active"],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("categories")
+        .select("id, name")
+        .order("name");
+      if (error) throw error;
+      return data ?? [];
+    },
+  });
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["exams"],
+    queryFn: async (): Promise<ExamRow[]> => {
+      const { data, error } = await supabase
+        .from("exams")
+        .select(
+          "id, title, description, duration_minutes, status, passing_score, access_type, category_id, categories!exams_category_id_fkey(name), exam_categories!exam_categories_exam_id_fkey(category_id, categories!exam_categories_category_id_fkey(name))",
+        )
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      return (data ?? []) as unknown as ExamRow[];
+    },
+  });
+
+  const deleteExam = useMutation({
+    mutationFn: async (id: string) => {
+      const { error } = await supabase.rpc("delete_exam", { p_id: id });
+      if (error) throw error;
+    },
+    onSuccess: () => {
+      toast.success("آزمون حذف شد");
+      setDeleteId(null);
+      void qc.invalidateQueries({ queryKey: ["exams"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const openNew = () => {
+    setWizardExamId(null);
+    setOpen(true);
+  };
+
+  const openEdit = (e: ExamRow) => {
+    setWizardExamId(e.id);
+    setOpen(true);
+  };
+
+  const getCategories = (e: ExamRow): string[] => {
+    const names = new Set<string>();
+    if (e.categories?.name) names.add(e.categories.name);
+    if (e.exam_categories) {
+      for (const ec of e.exam_categories) {
+        if (ec.categories?.name) names.add(ec.categories.name);
+      }
+    }
+    return [...names];
+  };
+
+  const isAdmin = role === "admin";
+
+  return (
+    <>
+      <PageHeader
+        title="آزمون‌ها"
+        description={isAdmin ? "مدیریت و ایجاد آزمون‌های سامانه" : "فهرست آزمون‌های در دسترس"}
+        action={
+          isAdmin ? (
+            <Button onClick={openNew}>
+              <Plus className="size-4" />
+              آزمون جدید
+            </Button>
+          ) : undefined
+        }
+      />
+      {isLoading ? (
+        <InlineLoading />
+      ) : error ? (
+        <ErrorState message={(error as Error).message} />
+      ) : data && data.length > 0 ? (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {data.map((e) => {
+            const cats = getCategories(e);
+            return (
+              <Card key={e.id} className="card-elevated">
+                <CardContent className="space-y-3 p-5">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-semibold">{e.title}</p>
+                    <Badge variant="secondary">{examStatusLabels[e.status] ?? e.status}</Badge>
+                  </div>
+                  <p className="line-clamp-3 text-sm text-muted-foreground">{e.description}</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {cats.length > 0 ? (
+                      cats.map((c) => (
+                        <Badge key={c} variant="outline" className="text-xs">{c}</Badge>
+                      ))
+                    ) : (
+                      <span className="text-xs text-muted-foreground">عمومی</span>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <Clock className="size-3.5" />
+                      {e.duration_minutes} دقیقه
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <GraduationCap className="size-3.5" />
+                      حد نصاب: {e.passing_score}
+                    </span>
+                    {e.access_type === "private" && (
+                      <Badge variant="outline" className="text-xs">خصوصی</Badge>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    {e.status === "published" ? (
+                      <Button className="flex-1" variant="default" onClick={() => setStartExam(e)}>
+                        شروع آزمون
+                      </Button>
+                    ) : null}
+                    {isAdmin ? (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => void navigate({ to: "/exams/$examId", params: { examId: e.id } })}
+                        >
+                          <Settings className="size-4" />
+                          مدیریت
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => openEdit(e)}>
+                          <Pencil className="size-4" />
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="text-destructive"
+                          onClick={() => setDeleteId(e.id)}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </>
+                    ) : null}
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyState description="آزمونی ثبت نشده است." />
+      )}
+
+      <ExamWizard
+        open={open}
+        examId={wizardExamId}
+        onOpenChange={(o) => {
+          setOpen(o);
+          if (!o) setWizardExamId(null);
+        }}
+      />
+
+      <AlertDialog open={Boolean(deleteId)} onOpenChange={(v) => !v && setDeleteId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>حذف آزمون</AlertDialogTitle>
+            <AlertDialogDescription>
+              آیا از حذف این آزمون مطمئن هستید؟ تمام سوالات مرتبط و شرکت‌های ثبت‌شده نیز حذف خواهند شد.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>انصراف</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => deleteId && deleteExam.mutate(deleteId)}
+            >
+              حذف
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <StartExamDialog
+        examId={startExam?.id ?? null}
+        examTitle={startExam?.title}
+        onOpenChange={(o) => !o && setStartExam(null)}
+      />
+    </>
+  );
+}
